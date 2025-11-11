@@ -129,6 +129,7 @@ def mm_dynamics(adj_matrix, h=2.0, T_steps=1000, dt=0.1,
     for t in range(T_steps):
         interaction = adj_matrix @ (x**h / (1 + x**h))
         x += dt * (-x + interaction)
+        x = np.clip(x, 0, None)
         states[t] = x
 
     return states
@@ -184,6 +185,7 @@ def wc_dynamics(adj_matrix, tau=1.0, mu=0.0, T_steps=1000, dt=0.1,
         sigmoid = 1 / (1 + np.exp(-tau * (x - mu)))
         interaction = adj_matrix @ sigmoid
         x += dt * (-x + interaction)
+        x = np.clip(x, 0, None)
         states[t] = x
 
     return states
