@@ -1,373 +1,278 @@
 """
 netdyn.py
 ==========================
-Network Dynamics Simulation Toolkit
+Network Dynamics Simulation Toolkit (Heterogeneous Parameters Version)
 -----------------------------------
-(版本 2: 使用 Scipy ODE 求解器)
-
-Example
--------
->>> from netdyn import sis_dynamics
->>> import networkx as nx
->>> A = nx.to_numpy_array(nx.erdos_renyi_graph(10, 0.2))
->>> X = sis_dynamics(A, beta=0.4, gamma=0.2, T_steps=200)
->>> print(X.shape)
+版本特点:
+1. 物理参数 (alpha, theta, beta 等) 无默认值，必须手动传入。
+2. 支持异质性参数：所有参数均可传入标量或长度为 N 的列表/数组。
 """
 
 import numpy as np
 from scipy.integrate import solve_ivp
 
-__all__ = [
-    "sis_dynamics",
-    "lv_dynamics",
-    "mp_dynamics",
-    "mm_dynamics",
-    "kuramoto_dynamics",
-    "wc_dynamics",
-]
+class NetworkDynamics:
+    """所有动力学模型的基类"""
+    def __init__(self, N, dt=0.1):
+        self.N = N
+        self.dt = dt
 
-
-# ==============================================================
-# SIS Model
-# ==============================================================
-def sis_dynamics(adj_matrix, beta=0.5, gamma=0.2, T_steps=1000, dt=0.1,
-                 init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行 SIS 模拟。
-
-    Equation:
-        dI_i/dt = β (1 - I_i) Σ_j A_ij I_j - γ I_i
+    def _process_param(self, param, name):
+        """
+        辅助函数：处理传入的参数。
+        如果传入的是列表或数组，确保其形状为 (N,)。
+        如果传入的是标量，保持原样（利用广播机制）。
+        """
+        # 如果是列表或元组，先转为数组
+        if isinstance(param, (list, tuple)):
+            param = np.array(param)
         
-    注意: beta 和 gamma 可以是标量，也可以是 N 维数组。
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    N = adj_matrix.shape[0]
-    
-    # 设置初始状态
-    if init_state is None:
-        I = np.random.rand(N)
-    else:
-        I = init_state.copy()
-    I = np.clip(I, 0, 1) # 裁剪初始状态
-
-    # 定义 ODE 方程
-    def _sis_ode(t, I):
-        infection = beta * (1 - I) * (adj_matrix @ I)
-        recovery = -gamma * I
-        return infection + recovery
-
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-
-    # 运行求解器
-    sol = solve_ivp(
-        _sis_ode,
-        t_span,
-        I,
-        t_eval=t_eval,
-        method='LSODA' # 自动切换的优秀求解器
-    )
-
-    if not sol.success:
-        print(f"警告: SIS 模拟求解器未能成功: {sol.message}")
-
-    # 格式化输出: 转置为 (T_steps, N) 并裁剪
-    states = sol.y.T
-    return np.clip(states, 0, 1)
-
-
-# ==============================================================
-# Lotka–Volterra Model
-# ==============================================================
-def lv_dynamics(adj_matrix, alpha=1.0, theta=1.0, T_steps=1000, dt=0.1,
-                init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行广义 Lotka-Volterra (GLV) 模拟。
-
-    Equation:
-        dx_i/dt = x_i(α_i - θ_i x_i) - x_i Σ_j A_ij x_j
+        # 如果是数组，检查形状
+        if isinstance(param, np.ndarray):
+            if param.ndim == 0: # 0-d array (scalar)
+                return float(param)
+            if param.shape != (self.N,):
+                raise ValueError(f"参数 '{name}' 的形状必须为 ({self.N},)，但得到了 {param.shape}")
+            return param
         
-    注意: alpha 和 theta 可以是标量，也可以是 N 维数组。
-    """
-    if seed is not None:
-        np.random.seed(seed)
+        # 如果是标量 (float/int)，直接返回
+        if np.isscalar(param):
+            return float(param)
+            
+        raise ValueError(f"参数 '{name}' 类型不支持: {type(param)}")
 
-    N = adj_matrix.shape[0]
+    def f(self, x):
+        raise NotImplementedError
 
-    if init_state is None:
-        x = np.random.rand(N)
-    else:
-        x = init_state.copy()
-    x = np.clip(x, 0, None) # 确保初始种群非负
+    def get_interaction_matrix(self, x_t):
+        raise NotImplementedError
 
-    # 定义 ODE 方程
-    def _lv_ode(t, x):
-        growth = alpha * x - theta * x**2
-        interaction = -(x * (adj_matrix @ x))
-        return growth + interaction
+    def _ode_func(self, t, x, A):
+        raise NotImplementedError
 
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-    
-    # 运行求解器
-    sol = solve_ivp(
-        _lv_ode,
-        t_span,
-        x,
-        t_eval=t_eval,
-        method='LSODA'
-    )
+    def simulate(self, A, T_steps=1000, init_state=None, seed=None):
+        if seed is not None:
+            np.random.seed(seed)
+            
+        if init_state is None:
+            x0 = np.random.rand(self.N)
+        else:
+            x0 = np.array(init_state)
+            if x0.shape != (self.N,):
+                 raise ValueError(f"初始状态 shape 必须为 ({self.N},)")
 
-    if not sol.success:
-        print(f"警告: LV 模拟求解器未能成功: {sol.message}")
+        t_end = T_steps * self.dt
+        t_eval = np.linspace(0.0, t_end, T_steps)
+
+        # 使用 lambda 包装 ode_func 以传入 A
+        fun = lambda t, x: self._ode_func(t, x, A)
+
+        sol = solve_ivp(
+            fun,
+            (0, t_end),
+            x0,
+            t_eval=t_eval,
+            method='LSODA'
+        )
         
-    # 格式化输出: 转置为 (T_steps, N) 并裁剪
-    states = sol.y.T
-    return np.clip(states, 0, None)
+        if not sol.success:
+            print(f"Warning: Solver failed - {sol.message}")
+            
+        return sol.y.T
 
 
 # ==============================================================
-# Mutualistic Population Model
+# 1. Lotka–Volterra (LV)
 # ==============================================================
-def mp_dynamics(adj_matrix, alpha=1.0, theta=1.0, T_steps=1000, dt=0.1,
-                init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行互惠种群 (MP) 模拟。
+class LVDynamics(NetworkDynamics):
+    def __init__(self, N, alpha, theta, dt=0.1):
+        """
+        alpha, theta: 标量 或 shape (N,) 的数组/列表
+        """
+        super().__init__(N, dt)
+        self.alpha = self._process_param(alpha, "alpha")
+        self.theta = self._process_param(theta, "theta")
 
-    Equation:
-        dx_i/dt = x_i(α_i - θ_i x_i) + x_i Σ_j A_ij * x_j^2 / (1 + x_j^2)
+    def f(self, x):
+        # Numpy 广播机制会自动处理：
+        # 如果 self.alpha 是 (N,)，x 是 (T, N)，则结果正确对应
+        return x * (self.alpha - self.theta * x)
+
+    def get_interaction_matrix(self, x):
+        if x.ndim == 1:
+            return -x[:, None] * x[None, :]
+        return -x[:, :, None] * x[:, None, :]
+
+    def _ode_func(self, t, x, A):
+        return self.f(x) - x * (A @ x)
+
+
+# ==============================================================
+# 2. Mutualistic Population (MP)
+# ==============================================================
+class MPDynamics(NetworkDynamics):
+    def __init__(self, N, alpha, theta, dt=0.1):
+        super().__init__(N, dt)
+        self.alpha = self._process_param(alpha, "alpha")
+        self.theta = self._process_param(theta, "theta")
+
+    def f(self, x):
+        return x * (self.alpha - self.theta * x)
+
+    def get_interaction_matrix(self, x):
+        term_j = (x**2) / (1 + x**2)
+        if x.ndim == 1:
+            return x[:, None] * term_j[None, :]
+        else:
+            return x[:, :, None] * term_j[:, None, :]
+
+    def _ode_func(self, t, x, A):
+        term_j = (x**2) / (1 + x**2)
+        return self.f(x) + x * (A @ term_j)
+
+
+# ==============================================================
+# 3. Michaelis–Menten (MM)
+# ==============================================================
+class MMDynamics(NetworkDynamics):
+    def __init__(self, N, h, dt=0.1):
+        super().__init__(N, dt)
+        # h 通常是生化反应系数，通常为标量，但也支持向量化
+        self.h = self._process_param(h, "h")
+
+    def f(self, x):
+        return -x
+
+    def get_interaction_matrix(self, x):
+        term_j = (x**self.h) / (1 + x**self.h)
+        if x.ndim == 1:
+            return np.tile(term_j[None, :], (self.N, 1))
+        else:
+            return np.tile(term_j[:, None, :], (1, self.N, 1))
+
+    def _ode_func(self, t, x, A):
+        term_j = (x**self.h) / (1 + x**self.h)
+        return -x + (A @ term_j)
+
+
+# ==============================================================
+# 4. SIS Model
+# ==============================================================
+class SISDynamics(NetworkDynamics):
+    def __init__(self, N, beta, delta, dt=0.1):
+        """
+        beta: 感染率 (可以是节点特有的易感性)
+        delta: 治愈率 (可以是节点特有的恢复力)
+        """
+        super().__init__(N, dt)
+        self.beta = self._process_param(beta, "beta")
+        self.delta = self._process_param(delta, "delta")
+
+    def f(self, x):
+        return -self.delta * x
+
+    def get_interaction_matrix(self, x):
+        # g(x_i, x_j) = beta_i * (1 - x_i) * x_j
+        # 注意：如果 beta 是向量 beta_i，它在这里作用于 i
         
-    注意: alpha 和 theta 可以是标量，也可以是 N 维数组。
-    """
-    if seed is not None:
-        np.random.seed(seed)
+        # 扩展 beta 以匹配维度
+        if np.ndim(self.beta) > 0: # 向量
+            if x.ndim == 1:
+                beta_expand = self.beta[:, None]
+            else:
+                beta_expand = self.beta[None, :, None] # (1, N, 1) 适配 (T, N, 1)
+        else: # 标量
+            beta_expand = self.beta
 
-    N = adj_matrix.shape[0]
+        if x.ndim == 1:
+            term_i = beta_expand * (1 - x[:, None]) # (N, 1)
+            term_j = x[None, :]                     # (1, N)
+            return term_i * term_j                  # (N, N)
+        else:
+            # x: (T, N)
+            # term_i: (T, N, 1)
+            term_i = beta_expand * (1 - x[:, :, None]) 
+            term_j = x[:, None, :]
+            return term_i * term_j
+
+    def _ode_func(self, t, x, A):
+        # dx = -delta*x + beta*(1-x) * (A @ x)
+        return -self.delta * x + self.beta * (1 - x) * (A @ x)
+
+
+# ==============================================================
+# 5. Kuramoto
+# ==============================================================
+class KuramotoDynamics(NetworkDynamics):
+    def __init__(self, N, omega, dt=0.05):
+        """
+        omega: 自然频率，必须传入，支持列表。
+        """
+        super().__init__(N, dt)
+        self.omega = self._process_param(omega, "omega")
+
+    def f(self, x):
+        # f_i = omega_i
+        if x.ndim == 2: # (T, N)
+            # 如果 omega 是 (N,)，广播到 (T, N)
+            return np.tile(self.omega, (x.shape[0], 1))
+        return self.omega
+
+    def get_interaction_matrix(self, x):
+        if x.ndim == 1:
+            return np.sin(x[None, :] - x[:, None])
+        else:
+            return np.sin(x[:, None, :] - x[:, :, None])
+
+    def _ode_func(self, t, x, A):
+        diff = x[None, :] - x[:, None]
+        return self.omega + np.sum(A * np.sin(diff), axis=1)
     
-    if init_state is None:
-        x = np.random.rand(N)
-    else:
-        x = init_state.copy()
-    x = np.clip(x, 0, None) # 确保初始种群非负
-
-    # 定义 ODE 方程
-    def _mp_ode(t, x):
-        x_j_term = x**2 / (1 + x**2)
-        mutual = adj_matrix @ x_j_term
-        dx = x * (alpha - theta * x + mutual)
-        return dx
-
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-    
-    # 运行求解器
-    sol = solve_ivp(
-        _mp_ode,
-        t_span,
-        x,
-        t_eval=t_eval,
-        method='LSODA'
-    )
-
-    if not sol.success:
-        print(f"警告: MP 模拟求解器未能成功: {sol.message}")
+    def simulate(self, A, T_steps=1000, init_state=None, seed=None):
+        if seed is not None: np.random.seed(seed)
+        if init_state is None:
+            init_state = np.random.uniform(-np.pi, np.pi, self.N)
         
-    # 格式化输出: 转置为 (T_steps, N) 并裁剪
-    states = sol.y.T
-    return np.clip(states, 0, None)
+        raw_data = super().simulate(A, T_steps, init_state)
+        return np.mod(raw_data + np.pi, 2*np.pi) - np.pi
 
 
 # ==============================================================
-# Michaelis–Menten Model
+# 6. Wilson-Cowan (WC)
 # ==============================================================
-def mm_dynamics(adj_matrix, h=2.0, T_steps=1000, dt=0.1,
-                init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行 Michaelis–Menten (MM) 模拟。
+class WCDynamics(NetworkDynamics):
+    def __init__(self, N, tau, mu, dt=0.1):
+        super().__init__(N, dt)
+        self.tau = self._process_param(tau, "tau")
+        self.mu = self._process_param(mu, "mu")
 
-    Equation:
-        dx_i/dt = -x_i + Σ_j A_ij * (x_j^h / (1 + x_j^h))
+    def f(self, x):
+        return -x
+
+    def get_interaction_matrix(self, x):
+        # g(x_i, x_j) = 1 / (1 + exp(-tau * (x_j - mu)))
+        # 这里 tau 和 mu 是 sigmoid 的参数
+        # 如果 tau/mu 是向量，通常这里的物理含义是突触后神经元(i)的响应属性还是突触前(j)的？
+        # Source 2 Table 1 显示这些是节点 i 的属性。但在 g(x_i, x_j) 中通常只有 x_j。
+        # 标准 WC 模型中，Response function 是 S(input_to_i)。
+        # 在 Source 2 中，g(xi, xj) = S(xj)。这意味着 Sigmoid 参数通常是 j 的属性。
+        # 但如果是 heterogeneous，我们需要确保维度匹配。
         
-    注意: h 是一个标量。
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    N = adj_matrix.shape[0]
-    
-    if init_state is None:
-        x = np.random.rand(N)
-    else:
-        x = init_state.copy()
-    x = np.clip(x, 0, None) # 确保初始表达非负
-
-    # 定义 ODE 方程
-    def _mm_ode(t, x):
-        interaction = adj_matrix @ (x**h / (1 + x**h))
-        return -x + interaction
-
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-
-    # 运行求解器
-    sol = solve_ivp(
-        _mm_ode,
-        t_span,
-        x,
-        t_eval=t_eval,
-        method='LSODA'
-    )
-
-    if not sol.success:
-        print(f"警告: MM 模拟求解器未能成功: {sol.message}")
-
-    # 格式化输出: 转置为 (T_steps, N) 并裁剪
-    states = sol.y.T
-    return np.clip(states, 0, None)
-
-
-# ==============================================================
-# Kuramoto Model
-# ==============================================================
-def kuramoto_dynamics(adj_matrix, omega=None, T_steps=1000, dt=0.05,
-                      init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行 Kuramoto 模拟。
-
-    Equation:
-        dθ_i/dt = ω_i + Σ_j A_ij sin(θ_j - θ_i)
+        # 假设 tau, mu 是节点 j 的属性（因为它们在 g(xj) 内部）
+        if np.ndim(self.tau) > 0:
+            tau_j = self.tau
+            mu_j = self.mu
+        else:
+            tau_j = self.tau
+            mu_j = self.mu
+            
+        sigmoid = 1 / (1 + np.exp(-tau_j * (x - mu_j)))
         
-    注意: omega 可以是标量，也可以是 N 维数组。
-    """
-    if seed is not None:
-        np.random.seed(seed)
+        if x.ndim == 1:
+            return np.tile(sigmoid[None, :], (self.N, 1))
+        else:
+            return np.tile(sigmoid[:, None, :], (1, self.N, 1))
 
-    N = adj_matrix.shape[0]
-    
-    if omega is None:
-        omega = np.random.normal(0, 1, N)
-        
-    if init_state is None:
-        theta = 2 * np.pi * np.random.rand(N)
-    else:
-        theta = init_state.copy()
-
-    # 定义 ODE 方程
-    def _kur_ode(t, theta):
-        sin_diffs = np.sin(theta[np.newaxis, :] - theta[:, np.newaxis])
-        coupling = np.sum(adj_matrix * sin_diffs, axis=1)
-        return omega + coupling
-
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-    
-    # 运行求解器
-    sol = solve_ivp(
-        _kur_ode,
-        t_span,
-        theta,
-        t_eval=t_eval,
-        method='LSODA'
-    )
-    
-    if not sol.success:
-        print(f"警告: Kuramoto 模拟求解器未能成功: {sol.message}")
-
-    # 格式化输出: 转置为 (T_steps, N) 并取模
-    states = sol.y.T
-    return np.mod(states, 2 * np.pi)
-
-
-# ==============================================================
-# Wilson–Cowan Model
-# ==============================================================
-def wc_dynamics(adj_matrix, tau=1.0, mu=0.0, T_steps=1000, dt=0.1,
-                init_state=None, seed=None):
-    """
-    使用 solve_ivp 运行 Wilson-Cowan (WC) 模拟。
-
-    Equation:
-        dx_i/dt = -x_i + Σ_j A_ij * [1 / (1 + exp(-τ (x_j - μ)))]
-        
-    注意: tau 和 mu 可以是标量，也可以是 N 维数组。
-    """
-    if seed is not None:
-        np.random.seed(seed)
-
-    N = adj_matrix.shape[0]
-    
-    if init_state is None:
-        x = np.random.rand(N)
-    else:
-        x = init_state.copy()
-    x = np.clip(x, 0, None) # 确保初始活动非负
-
-    # 定义 ODE 方程
-    def _wc_ode(t, x):
-        sigmoid = 1 / (1 + np.exp(-tau * (x - mu)))
-        interaction = adj_matrix @ sigmoid
-        return -x + interaction
-
-    # 设置模拟时间
-    t_end = T_steps * dt
-    t_span = (0.0, t_end)
-    t_eval = np.linspace(0.0, t_end, T_steps)
-
-    # 运行求解器
-    sol = solve_ivp(
-        _wc_ode,
-        t_span,
-        x,
-        t_eval=t_eval,
-        method='LSODA'
-    )
-    
-    if not sol.success:
-        print(f"警告: WC 模拟求解器未能成功: {sol.message}")
-        
-    # 格式化输出: 转置为 (T_steps, N) 并裁剪
-    states = sol.y.T
-    return np.clip(states, 0, None)
-
-
-# ==============================================================
-# Quick Test (only runs when executed directly)
-# ==============================================================
-if __name__ == "__main__":
-    import networkx as nx
-    import matplotlib.pyplot as plt
-
-    A = nx.to_numpy_array(nx.erdos_renyi_graph(20, 0.2, seed=42))
-
-    print("Running LV model for demo...")
-    # 演示每个节点有不同的参数
-    N_nodes = A.shape[0]
-    alpha_vals = np.linspace(0.5, 1.5, N_nodes)
-    theta_vals = np.linspace(0.8, 1.2, N_nodes)
-    
-    X = lv_dynamics(
-        A, 
-        alpha=alpha_vals, 
-        theta=theta_vals, 
-        T_steps=500, 
-        dt=0.1
-    )
-    print("Simulation complete. Shape:", X.shape)
-
-    plt.plot(X[:, :])
-    plt.xlabel("Time step")
-    plt.ylabel("State")
-    plt.title("Lotka-Volterra (LV) model example")
-    plt.show()
+    def _ode_func(self, t, x, A):
+        sigmoid = 1 / (1 + np.exp(-self.tau * (x - self.mu)))
+        return -x + (A @ sigmoid)
